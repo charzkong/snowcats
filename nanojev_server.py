@@ -50,7 +50,7 @@ def startup():
 
     print("Loading NanoJev (cuda:0, bf16)...")
     predictor = DecisionPredictor(
-        path, device_name="cuda:0", precision="bf16", disable_native_triton=True
+        path, device_name="cuda:0", precision="bf16", disable_native_triton=False
     )
     print("NanoJev ready.")
 
