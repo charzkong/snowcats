@@ -1,17 +1,20 @@
 """Standalone FastAPI server for anthonym21/qwen3-0.6b-rlcd-decision.
 
-Run from inside the eve-rlcd repo directory with `uv run uvicorn ...` so the
-package's own `rlcd` module resolves via its own .venv - keep this as its own
-process, since this package's top-level name (`rlcd`) collides with other
-`rlcd`-named packages used by other models in this deployment.
+Uses the `rlcd` package from https://github.com/anthony-maio/eve-rlcd,
+installed with --no-deps into the ms-swift venv (its torch>=2.7 /
+transformers>=5 pins are already satisfied there) instead of eve-rlcd's own
+separate venv - avoids a second full CUDA torch install we don't have disk
+space for. Downloads its own weights on startup so no manual `hf download`
+step is needed first.
 """
 import os
 os.environ.setdefault("USE_TF", "0")
 
-from typing import List, Optional, Union
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from huggingface_hub import snapshot_download
 
 from rlcd.decide import ChoiceQ, ScoreQ, NoulQ, Decider
 
@@ -25,7 +28,7 @@ app.add_middleware(
 )
 
 decider: Optional[Decider] = None
-MODEL_DIR = "qwen3-rlcd-decision"
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3-rlcd-decision")
 
 
 class QuestionIn(BaseModel):
@@ -42,6 +45,8 @@ class PredictRequest(BaseModel):
 @app.on_event("startup")
 def startup():
     global decider
+    print("Downloading/locating qwen3-0.6b-rlcd-decision weights...")
+    snapshot_download("anthonym21/qwen3-0.6b-rlcd-decision", local_dir=MODEL_DIR)
     print("Loading qwen3-0.6b-rlcd-decision...")
     decider = Decider.load(MODEL_DIR)
     print("qwen3-0.6b-rlcd-decision ready.")
