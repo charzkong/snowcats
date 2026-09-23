@@ -26,6 +26,7 @@ app.add_middleware(
 # model_name -> internal service URL
 BACKENDS = {
     "nox4b": "http://localhost:18076/api/nox4b/predict",
+    "lux9b": "http://localhost:18077/api/lux9b/predict",
 }
 
 
@@ -38,7 +39,12 @@ def _proxy(url: str, payload: Dict[str, Any]):
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        raise HTTPException(status_code=e.code, detail=e.read().decode())
+        body = e.read().decode()
+        try:
+            detail = json.loads(body).get("detail", body)
+        except ValueError:
+            detail = body
+        raise HTTPException(status_code=e.code, detail=detail)
     except urllib.error.URLError as e:
         raise HTTPException(status_code=503, detail=f"backend unreachable: {e}")
 
@@ -51,3 +57,8 @@ def health():
 @app.post("/api/nox4b/predict")
 def nox4b_predict(req: Dict[str, Any]):
     return _proxy(BACKENDS["nox4b"], req)
+
+
+@app.post("/api/lux9b/predict")
+def lux9b_predict(req: Dict[str, Any]):
+    return _proxy(BACKENDS["lux9b"], req)

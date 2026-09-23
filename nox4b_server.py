@@ -108,6 +108,8 @@ def _to_nox_question(q: QuestionIn):
     if q.type == "choice":
         if not q.options or len(q.options) < 2:
             raise HTTPException(status_code=400, detail="choice questions require at least 2 'options'")
+        if len(set(q.options)) != len(q.options):
+            raise HTTPException(status_code=400, detail="choice 'options' must be unique")
         return {"type": "choice", "instructions": q.text, "criteria": {o: None for o in q.options}}
     if q.type == "score":
         if not q.options or not 2 <= len(q.options) <= 10:
