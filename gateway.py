@@ -25,7 +25,7 @@ app.add_middleware(
 
 # model_name -> internal service URL
 BACKENDS = {
-    "qwen3rlcd": "http://localhost:18075/api/qwen3rlcd/predict",
+    "nox4b": "http://localhost:18076/api/nox4b/predict",
 }
 
 
@@ -35,7 +35,7 @@ def _proxy(url: str, payload: Dict[str, Any]):
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         raise HTTPException(status_code=e.code, detail=e.read().decode())
@@ -48,6 +48,6 @@ def health():
     return {"status": "ok", "backends": list(BACKENDS.keys())}
 
 
-@app.post("/api/qwen3rlcd/predict")
-def qwen3rlcd_predict(req: Dict[str, Any]):
-    return _proxy(BACKENDS["qwen3rlcd"], req)
+@app.post("/api/nox4b/predict")
+def nox4b_predict(req: Dict[str, Any]):
+    return _proxy(BACKENDS["nox4b"], req)
