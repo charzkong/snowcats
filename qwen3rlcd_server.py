@@ -28,7 +28,6 @@ app.add_middleware(
 )
 
 decider: Optional[Decider] = None
-MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen3-rlcd-decision")
 
 
 class QuestionIn(BaseModel):
@@ -46,9 +45,9 @@ class PredictRequest(BaseModel):
 def startup():
     global decider
     print("Downloading/locating qwen3-0.6b-rlcd-decision weights...")
-    snapshot_download("anthonym21/qwen3-0.6b-rlcd-decision", local_dir=MODEL_DIR)
+    path = snapshot_download("anthonym21/qwen3-0.6b-rlcd-decision")
     print("Loading qwen3-0.6b-rlcd-decision...")
-    decider = Decider.load(MODEL_DIR)
+    decider = Decider.load(path)
     print("qwen3-0.6b-rlcd-decision ready.")
 
 
