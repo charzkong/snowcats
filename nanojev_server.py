@@ -42,7 +42,7 @@ def startup():
             "config.json",
             "backbone_config/*",
             "tokenizer/*",
-            "source/scripts/predict_toy_decisions.py",
+            "source/scripts/*.py",
         ],
     )
     sys.path.insert(0, os.path.join(path, "source", "scripts"))
