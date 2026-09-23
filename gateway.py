@@ -25,7 +25,7 @@ app.add_middleware(
 
 # model_name -> internal service URL
 BACKENDS = {
-    "nanojev": "http://localhost:18076/api/nanojev/predict",
+    "qwen3rlcd": "http://localhost:18075/api/qwen3rlcd/predict",
 }
 
 
@@ -48,6 +48,6 @@ def health():
     return {"status": "ok", "backends": list(BACKENDS.keys())}
 
 
-@app.post("/api/nanojev/predict")
-def nanojev_predict(req: Dict[str, Any]):
-    return _proxy(BACKENDS["nanojev"], req)
+@app.post("/api/qwen3rlcd/predict")
+def qwen3rlcd_predict(req: Dict[str, Any]):
+    return _proxy(BACKENDS["qwen3rlcd"], req)
