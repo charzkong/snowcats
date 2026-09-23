@@ -25,7 +25,7 @@ app.add_middleware(
 
 # model_name -> internal service URL
 BACKENDS = {
-    "lfm25-rlcd": "http://localhost:18076/api/lfm25rlcd/predict",
+    "nanojev": "http://localhost:18076/api/nanojev/predict",
 }
 
 
@@ -48,6 +48,6 @@ def health():
     return {"status": "ok", "backends": list(BACKENDS.keys())}
 
 
-@app.post("/api/lfm25rlcd/predict")
-def lfm25rlcd_predict(req: Dict[str, Any]):
-    return _proxy(BACKENDS["lfm25-rlcd"], req)
+@app.post("/api/nanojev/predict")
+def nanojev_predict(req: Dict[str, Any]):
+    return _proxy(BACKENDS["nanojev"], req)
