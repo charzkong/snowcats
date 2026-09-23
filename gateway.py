@@ -25,8 +25,7 @@ app.add_middleware(
 
 # model_name -> internal service URL
 BACKENDS = {
-    "openjev": "http://localhost:18074/api/openjev/predict",
-    # "qwen3-rlcd": "http://localhost:18075/api/qwen3rlcd/predict",   # added once model 2 is ready
+    "qwen3-rlcd": "http://localhost:18075/api/qwen3rlcd/predict",
     # "lfm25-rlcd": "http://localhost:18076/api/lfm25rlcd/predict",  # added once model 3 is ready
 }
 
@@ -50,6 +49,6 @@ def health():
     return {"status": "ok", "backends": list(BACKENDS.keys())}
 
 
-@app.post("/api/openjev/predict")
-def openjev_predict(req: Dict[str, Any]):
-    return _proxy(BACKENDS["openjev"], req)
+@app.post("/api/qwen3rlcd/predict")
+def qwen3rlcd_predict(req: Dict[str, Any]):
+    return _proxy(BACKENDS["qwen3-rlcd"], req)
