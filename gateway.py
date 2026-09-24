@@ -27,6 +27,7 @@ app.add_middleware(
 BACKENDS = {
     "nox4b": "http://localhost:18076/api/nox4b/predict",
     "lux9b": "http://localhost:18077/api/lux9b/predict",
+    "lfm25rlcd": "http://localhost:18074/api/lfm25rlcd/predict",
 }
 
 
@@ -62,3 +63,8 @@ def nox4b_predict(req: Dict[str, Any]):
 @app.post("/api/lux9b/predict")
 def lux9b_predict(req: Dict[str, Any]):
     return _proxy(BACKENDS["lux9b"], req)
+
+
+@app.post("/api/lfm25rlcd/predict")
+def lfm25rlcd_predict(req: Dict[str, Any]):
+    return _proxy(BACKENDS["lfm25rlcd"], req)
