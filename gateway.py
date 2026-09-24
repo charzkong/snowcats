@@ -29,6 +29,7 @@ BACKENDS = {
     "lux9b": "http://localhost:18077/api/lux9b/predict",
     "lfm25rlcd": "http://localhost:18074/api/lfm25rlcd/predict",
     "laya": "http://localhost:18075/api/laya/predict",
+    "decider2b": "http://localhost:18078/api/decider2b/predict",
 }
 
 
@@ -74,3 +75,8 @@ def lfm25rlcd_predict(req: Dict[str, Any]):
 @app.post("/api/laya/predict")
 def laya_predict(req: Dict[str, Any]):
     return _proxy(BACKENDS["laya"], req)
+
+
+@app.post("/api/decider2b/predict")
+def decider2b_predict(req: Dict[str, Any]):
+    return _proxy(BACKENDS["decider2b"], req)
