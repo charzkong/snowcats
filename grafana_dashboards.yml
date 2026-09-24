@@ -1,0 +1,7 @@
+# Grafana provisioning: goes in <provisioning>/dashboards/
+apiVersion: 1
+providers:
+  - name: decision-models
+    type: file
+    options:
+      path: /home/ecs-user/services/monitoring/dashboards

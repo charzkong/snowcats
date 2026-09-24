@@ -1,0 +1,10 @@
+# Prometheus config for the decision model gateway (ticket #253).
+# Scrapes the gateway's local-only metrics port every 5 s.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: decision-gateway
+    static_configs:
+      - targets: ["127.0.0.1:18090"]
