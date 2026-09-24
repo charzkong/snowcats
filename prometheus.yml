@@ -1,10 +1,14 @@
 # Prometheus config for the decision model gateway (ticket #253).
-# Scrapes the gateway's local-only metrics port every 5 s.
+# Scrapes the gateway's /metrics on its normal port (18073) every 5 s,
+# using the token file that only exists on the box.
 global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
 scrape_configs:
   - job_name: decision-gateway
+    authorization:
+      type: Bearer
+      credentials_file: /home/ecs-user/services/monitoring/metrics_token
     static_configs:
-      - targets: ["127.0.0.1:18090"]
+      - targets: ["127.0.0.1:18073"]

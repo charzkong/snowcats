@@ -4,26 +4,30 @@ Each model runs as its own standalone process (separate venv/deps, avoiding
 package name collisions between them); this just proxies requests to the
 right internal port.
 
-Prometheus metrics (ticket #253) are served on a separate port bound to
-127.0.0.1 (METRICS_PORT, default 18090), so they are not reachable through the
-public URL. The gateway sees every request, so all metrics are recorded here
-and the model servers stay unchanged.
+Prometheus metrics (ticket #253) are served at GET /metrics on this same port.
+Scrapes must send "Authorization: Bearer <token>", where the token is read from
+METRICS_TOKEN_FILE; anything else gets 404, so the public URL shows nothing.
+If the token file is missing or empty, /metrics is off. The gateway sees every
+request, so all metrics are recorded here and the model servers stay unchanged.
 """
 import os
 os.environ.setdefault("USE_TF", "0")
 
+import hmac
 import json
 import subprocess
 import time
 import urllib.request
 import urllib.error
 from typing import Any, Dict
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from prometheus_client.core import REGISTRY, GaugeMetricFamily
 
-METRICS_PORT = int(os.environ.get("METRICS_PORT", "18090"))
+METRICS_TOKEN_FILE = os.environ.get(
+    "METRICS_TOKEN_FILE", "/home/ecs-user/services/monitoring/metrics_token"
+)
 
 app = FastAPI(title="Decision Model Gateway")
 app.add_middleware(
@@ -39,6 +43,8 @@ BACKENDS = {
     "nox4b": "http://localhost:18076/api/nox4b/predict",
     "lux9b": "http://localhost:18077/api/lux9b/predict",
     "lfm25rlcd": "http://localhost:18074/api/lfm25rlcd/predict",
+    "laya": "http://localhost:18075/api/laya/predict",
+    "decider2b": "http://localhost:18078/api/decider2b/predict",
 }
 
 # Latency buckets span ~30 ms model calls up to the 120 s backend timeout.
@@ -110,10 +116,21 @@ class ScrapeTimeCollector:
 REGISTRY.register(ScrapeTimeCollector())
 
 
-@app.on_event("startup")
-def start_metrics_server():
-    start_http_server(METRICS_PORT, addr="127.0.0.1")
-    print(f"Prometheus metrics on http://127.0.0.1:{METRICS_PORT}/metrics")
+def _metrics_token():
+    try:
+        with open(METRICS_TOKEN_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(request: Request):
+    token = _metrics_token()
+    sent = request.headers.get("authorization", "")
+    if not token or not hmac.compare_digest(sent, f"Bearer {token}"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
 
 def _proxy(model: str, payload: Dict[str, Any]):
@@ -169,3 +186,13 @@ def lux9b_predict(req: Dict[str, Any]):
 @app.post("/api/lfm25rlcd/predict")
 def lfm25rlcd_predict(req: Dict[str, Any]):
     return _proxy("lfm25rlcd", req)
+
+
+@app.post("/api/laya/predict")
+def laya_predict(req: Dict[str, Any]):
+    return _proxy("laya", req)
+
+
+@app.post("/api/decider2b/predict")
+def decider2b_predict(req: Dict[str, Any]):
+    return _proxy("decider2b", req)
