@@ -9,6 +9,10 @@ Scrapes must send "Authorization: Bearer <token>", where the token is read from
 METRICS_TOKEN_FILE; anything else gets 404, so the public URL shows nothing.
 If the token file is missing or empty, /metrics is off. The gateway sees every
 request, so all metrics are recorded here and the model servers stay unchanged.
+
+Request count, latency and in-flight are recorded in an HTTP middleware, which
+runs before FastAPI hands a sync endpoint to its 40-thread pool. So requests
+waiting for a free thread are counted too.
 """
 import os
 os.environ.setdefault("USE_TF", "0")
@@ -17,9 +21,12 @@ import hmac
 import json
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.request
 import urllib.error
 from typing import Any, Dict
+import anyio.to_thread
+from anyio import CapacityLimiter
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
@@ -53,18 +60,20 @@ LATENCY_BUCKETS = (0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75,
 
 REQUESTS = Counter(
     "decision_requests_total",
-    "Requests handled by the gateway, by model and HTTP status code.",
+    "Predict requests received by the gateway, by model and HTTP status code.",
     ["model", "code"],
 )
 LATENCY = Histogram(
     "decision_request_duration_seconds",
-    "Gateway-side E2E latency per request, including time queued in the backend.",
+    "Gateway-side E2E latency per request, including time waiting for a gateway "
+    "thread and time queued in the backend.",
     ["model"],
     buckets=LATENCY_BUCKETS,
 )
 IN_FLIGHT = Gauge(
     "decision_requests_in_flight",
-    "Requests currently inside the gateway for this model (running + waiting).",
+    "Requests currently inside the gateway for this model (running + waiting, "
+    "including waiting for a gateway thread).",
     ["model"],
 )
 MODEL_TIME = Histogram(
@@ -78,18 +87,27 @@ for _m in BACKENDS:
     IN_FLIGHT.labels(_m).set(0)
 
 
+def _backend_up(url: str) -> float:
+    health = url.split("/api/")[0] + "/health"
+    try:
+        with urllib.request.urlopen(health, timeout=2) as r:
+            return 1.0 if r.status == 200 else 0.0
+    except Exception:
+        return 0.0
+
+
+_health_pool = ThreadPoolExecutor(max_workers=len(BACKENDS))
+
+
 class ScrapeTimeCollector:
     """Backend liveness and GPU memory, read fresh on every scrape."""
 
     def collect(self):
-        up = GaugeMetricFamily("decision_backend_up", "1 if the backend's /health answers, else 0.", labels=["model"])
-        for model, url in BACKENDS.items():
-            health = url.split("/api/")[0] + "/health"
-            try:
-                with urllib.request.urlopen(health, timeout=2) as r:
-                    up.add_metric([model], 1.0 if r.status == 200 else 0.0)
-            except Exception:
-                up.add_metric([model], 0.0)
+        # A busy backend answers /health slowly; check all of them in parallel so
+        # one scrape takes at most ~2 s. A fully saturated backend may read 0.
+        up = GaugeMetricFamily("decision_backend_up", "1 if the backend's /health answers within 2 s, else 0.", labels=["model"])
+        for model, value in zip(BACKENDS, _health_pool.map(_backend_up, BACKENDS.values())):
+            up.add_metric([model], value)
         yield up
 
         try:
@@ -124,13 +142,41 @@ def _metrics_token():
         return ""
 
 
+# /metrics gets its own thread, outside FastAPI's shared 40-thread pool, so a
+# scrape is not stuck behind predict requests when the gateway is busy.
+_metrics_limiter = CapacityLimiter(1)
+
+
 @app.get("/metrics", include_in_schema=False)
-def metrics(request: Request):
+async def metrics(request: Request):
     token = _metrics_token()
     sent = request.headers.get("authorization", "")
     if not token or not hmac.compare_digest(sent, f"Bearer {token}"):
         raise HTTPException(status_code=404, detail="Not Found")
-    return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+    body = await anyio.to_thread.run_sync(generate_latest, REGISTRY, limiter=_metrics_limiter)
+    return Response(body, media_type=CONTENT_TYPE_LATEST)
+
+
+# "/api/<model>/predict" -> model name, for the metrics middleware.
+PREDICT_PATHS = {f"/api/{m}/predict": m for m in BACKENDS}
+
+
+@app.middleware("http")
+async def record_metrics(request: Request, call_next):
+    model = PREDICT_PATHS.get(request.url.path) if request.method == "POST" else None
+    if model is None:
+        return await call_next(request)
+    code = 500
+    IN_FLIGHT.labels(model).inc()
+    t0 = time.perf_counter()
+    try:
+        response = await call_next(request)
+        code = response.status_code
+        return response
+    finally:
+        LATENCY.labels(model).observe(time.perf_counter() - t0)
+        REQUESTS.labels(model, str(code)).inc()
+        IN_FLIGHT.labels(model).dec()
 
 
 def _proxy(model: str, payload: Dict[str, Any]):
@@ -138,18 +184,13 @@ def _proxy(model: str, payload: Dict[str, Any]):
     req = urllib.request.Request(
         BACKENDS[model], data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
-    code = 500
-    IN_FLIGHT.labels(model).inc()
-    t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             result = json.loads(r.read())
-        code = 200
         if isinstance(result.get("elapsed_ms"), (int, float)):
             MODEL_TIME.labels(model).observe(result["elapsed_ms"] / 1000)
         return result
     except urllib.error.HTTPError as e:
-        code = e.code
         body = e.read().decode()
         try:
             detail = json.loads(body).get("detail", body)
@@ -157,15 +198,10 @@ def _proxy(model: str, payload: Dict[str, Any]):
             detail = body
         raise HTTPException(status_code=e.code, detail=detail)
     except TimeoutError as e:
-        code = 504
         raise HTTPException(status_code=504, detail=f"backend timed out: {e}")
     except urllib.error.URLError as e:
         code = 504 if isinstance(e.reason, TimeoutError) else 503
         raise HTTPException(status_code=code, detail=f"backend unreachable: {e}")
-    finally:
-        LATENCY.labels(model).observe(time.perf_counter() - t0)
-        REQUESTS.labels(model, str(code)).inc()
-        IN_FLIGHT.labels(model).dec()
 
 
 @app.get("/health")
