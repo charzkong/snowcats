@@ -19,10 +19,13 @@ actually overloaded. Each model has an adaptive concurrency limit (AIMD):
 - about once a second, look at the P90 gateway latency of its recent
   successful requests;
 - P90 above LATENCY_TARGET_SECONDS (default 2.0): limit *= 0.8;
-- P90 under target and the limit was actually reached: limit += 1;
+- P90 under target and the limit was actually reached: limit += max(1, 25%);
 - limit stays within [CONCURRENCY_MIN, CONCURRENCY_MAX] (default 1..32).
-A request over the limit gets 429 straight away, without taking a gateway
-thread. A fixed request count doesn't work here: one long input can keep the
+A request at the limit is still let in (and the limit raised) when responses
+are clearly fast (requests finished recently, their P90 and the oldest in
+progress under half the target), at most doubling the limit per second, so
+a sudden burst isn't rejected while the model has room. Otherwise it gets 429
+straight away, without taking a gateway thread. A fixed request count doesn't work here: one long input can keep the
 GPU at 100% on its own, while many short ones fit easily. Latency covers both.
 Starting limits are the load-test thresholds (docs/decision-endpoints-load-
 test.html). CONCURRENCY_LIMITS="laya=0" turns shedding off for a model.
@@ -106,7 +109,8 @@ class AdaptiveLimit:
 
     ADJUST_EVERY = 1.0   # seconds between adjustments
     MIN_SAMPLES = 5      # don't adjust on fewer completed requests than this
-    DECREASE = 0.8
+    DECREASE = 0.8       # limit *= this when too slow
+    INCREASE = 0.25      # limit += max(1, limit * this) when fast and in use
 
     def __init__(self, initial: int):
         self.limit = float(min(max(initial, CONCURRENCY_MIN), CONCURRENCY_MAX))
@@ -114,6 +118,11 @@ class AdaptiveLimit:
         self.peak_active = 0
         self.samples = deque(maxlen=50)
         self.last_adjust = time.monotonic()
+        self.grow_cap = self._next_grow_cap()
+
+    def _next_grow_cap(self) -> int:
+        # Growing on the spot may at most double the limit per ADJUST_EVERY.
+        return min(CONCURRENCY_MAX, max(self.allowed * 2, self.allowed + 1))
 
     @property
     def active(self) -> int:
@@ -128,6 +137,31 @@ class AdaptiveLimit:
         self.started[token] = time.monotonic()
         self.peak_active = max(self.peak_active, self.active)
         return token
+
+    def healthy(self) -> bool:
+        """True only with clear evidence of spare capacity: requests have finished
+        recently, their P90 is under half the target, and so is the age of the
+        oldest request in progress. No finished requests means no evidence."""
+        if not self.samples:
+            return False
+        half = LATENCY_TARGET_SECONDS / 2
+        ordered = sorted(self.samples)
+        if ordered[int(0.9 * (len(ordered) - 1))] > half:
+            return False
+        if self.started and time.monotonic() - min(self.started.values()) > half:
+            return False
+        return True
+
+    def admit(self) -> bool:
+        """Admit if under the limit. At the limit, grow it on the spot when responses
+        are clearly fast (at most doubling per ADJUST_EVERY), so bursts aren't
+        rejected while the model has room."""
+        if self.active < self.allowed:
+            return True
+        if self.allowed < self.grow_cap and self.healthy():
+            self.limit = float(min(self.grow_cap, self.active + 1))
+            return True
+        return False
 
     def finish(self, token: object, latency: float, ok: bool):
         self.started.pop(token, None)
@@ -154,12 +188,13 @@ class AdaptiveLimit:
             self.limit = max(CONCURRENCY_MIN, self.limit * self.DECREASE)
         elif p90 is not None and self.peak_active >= self.allowed:
             # Only grow while the limit is really in use, or it creeps up while idle.
-            self.limit = min(CONCURRENCY_MAX, self.limit + 1)
+            self.limit = min(CONCURRENCY_MAX, self.limit + max(1.0, self.limit * self.INCREASE))
         else:
             return   # not enough evidence either way; keep collecting samples
         self.samples.clear()
         self.peak_active = self.active
         self.last_adjust = now
+        self.grow_cap = self._next_grow_cap()
 
 
 # model -> AdaptiveLimit, or None when shedding is off for that model.
@@ -307,13 +342,13 @@ async def record_metrics(request: Request, call_next):
     if limiter is not None:
         limiter.adjust()
         LIMIT.labels(model).set(limiter.allowed)
-    if limiter is not None and limiter.active >= limiter.allowed:
+    if limiter is not None and not limiter.admit():
         # Kept out of LATENCY and IN_FLIGHT so instant rejections don't skew them.
         REQUESTS.labels(model, "429").inc()
         return JSONResponse(
             status_code=429,
-            content={"detail": f"{model} is overloaded: {limiter.active} requests in progress, "
-                               f"responses are slower than {LATENCY_TARGET_SECONDS:g} s. "
+            content={"detail": f"{model} is busy: {limiter.active} requests in progress and "
+                               f"responses are slowing down (target {LATENCY_TARGET_SECONDS:g} s). "
                                f"Retry after {RETRY_AFTER_SECONDS} second."},
             # This middleware sits outside CORSMiddleware, so add the header here.
             headers={"Retry-After": str(RETRY_AFTER_SECONDS), "Access-Control-Allow-Origin": "*"},
