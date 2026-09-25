@@ -83,6 +83,24 @@ MODEL_TIME = Histogram(
     ["model"],
     buckets=LATENCY_BUCKETS,
 )
+INPUT_BYTES = Histogram(
+    "decision_request_input_bytes",
+    "Size of the JSON request body forwarded to the backend (sizes only, no content).",
+    ["model"],
+    buckets=(128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576),
+)
+INPUT_TOKENS = Histogram(
+    "decision_request_input_tokens",
+    "Input tokens reported by the backend (usage.input_tokens; models that report it).",
+    ["model"],
+    buckets=(32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384),
+)
+QUESTIONS = Histogram(
+    "decision_request_questions",
+    "Questions per request (for LFM: fields in the schema).",
+    ["model"],
+    buckets=(1, 2, 3, 4, 6, 8, 12, 16, 32, 64),
+)
 for _m in BACKENDS:
     IN_FLIGHT.labels(_m).set(0)
 
@@ -179,8 +197,20 @@ async def record_metrics(request: Request, call_next):
         IN_FLIGHT.labels(model).dec()
 
 
+def _record_input_shape(model: str, payload: Dict[str, Any], body: bytes):
+    INPUT_BYTES.labels(model).observe(len(body))
+    questions = payload.get("questions")
+    if isinstance(questions, list):
+        QUESTIONS.labels(model).observe(len(questions))
+    else:
+        props = (payload.get("schema") or {}).get("properties") if isinstance(payload.get("schema"), dict) else None
+        if isinstance(props, dict):
+            QUESTIONS.labels(model).observe(len(props))
+
+
 def _proxy(model: str, payload: Dict[str, Any]):
     body = json.dumps(payload).encode()
+    _record_input_shape(model, payload, body)
     req = urllib.request.Request(
         BACKENDS[model], data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
@@ -189,6 +219,9 @@ def _proxy(model: str, payload: Dict[str, Any]):
             result = json.loads(r.read())
         if isinstance(result.get("elapsed_ms"), (int, float)):
             MODEL_TIME.labels(model).observe(result["elapsed_ms"] / 1000)
+        usage = result.get("usage") if isinstance(result, dict) else None
+        if isinstance(usage, dict) and isinstance(usage.get("input_tokens"), (int, float)):
+            INPUT_TOKENS.labels(model).observe(usage["input_tokens"])
         return result
     except urllib.error.HTTPError as e:
         body = e.read().decode()
