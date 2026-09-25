@@ -11,6 +11,12 @@ DECIDER_GRAPHS=1 for much lower latency when there is room.
 
 Request format matches /api/nox4b, /api/lux9b and /api/laya. Choice questions
 may also pass `descriptions` (same length as `options`).
+
+Model calls are serialized with a lock. FastAPI runs each sync request in its
+own thread, and two concurrent system_one() calls failed with
+"'NoneType' object is not a mapping" (seen 2026-09-25). The GPU runs one
+forward at a time anyway, so the lock costs next to nothing; concurrent
+requests just wait their turn (the gateway's adaptive limit caps the queue).
 """
 import os
 os.environ.setdefault("USE_TF", "0")
@@ -18,6 +24,7 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import sys
+import threading
 from typing import Any, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +45,7 @@ app.add_middleware(
 )
 
 decider = None
+model_lock = threading.Lock()  # decider isn't safe to call from two threads at once
 
 
 class QuestionIn(BaseModel):
@@ -102,7 +110,8 @@ def predict(req: PredictRequest):
         raise HTTPException(status_code=400, detail="questions must be a nonempty list")
     try:
         questions = {f"q{i}": _to_decider_question(q) for i, q in enumerate(req.questions)}
-        result = decider.system_one(req.state, questions)
+        with model_lock:
+            result = decider.system_one(req.state, questions)
         return {
             "model": result.get("model"),
             "answers": [result["answers"][qid] for qid in questions],
