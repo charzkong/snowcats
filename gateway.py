@@ -17,16 +17,21 @@ waiting for a free thread are counted too.
 The same middleware sheds load with HTTP 429 (Retry-After: 1) when a model is
 actually overloaded. Each model has an adaptive concurrency limit (AIMD):
 - about once a second, look at the P90 gateway latency of its recent
-  successful requests;
-- P90 above LATENCY_TARGET_SECONDS (default 2.0): limit *= 0.8;
+  successful requests, and the age of the oldest request in progress;
+- either above LATENCY_TARGET_SECONDS (default 2.0) while 2+ requests were in
+  progress at once: limit *= 0.8. A lone slow request is a long input, not
+  overload, so it doesn't lower the limit;
 - P90 under target and the limit was actually reached: limit += max(1, 25%);
-- limit stays within [CONCURRENCY_MIN, CONCURRENCY_MAX] (default 1..32).
+- limit stays within [CONCURRENCY_MIN, CONCURRENCY_MAX] (default 2..32). The
+  floor of 2 means one caller sending back-to-back requests can't hold the
+  only slot and lock everyone else out (seen 2026-09-25 with a floor of 1).
 A request at the limit is still let in (and the limit raised) when responses
 are clearly fast (requests finished recently, their P90 and the oldest in
 progress under half the target), at most doubling the limit per second, so
 a sudden burst isn't rejected while the model has room. Otherwise it gets 429
-straight away, without taking a gateway thread. A fixed request count doesn't work here: one long input can keep the
-GPU at 100% on its own, while many short ones fit easily. Latency covers both.
+straight away, without taking a gateway thread. A fixed request count doesn't
+work here: one long input can keep the GPU at 100% on its own, while many
+short ones fit easily. Latency covers both.
 Starting limits are the load-test thresholds (docs/decision-endpoints-load-
 test.html). CONCURRENCY_LIMITS="laya=0" turns shedding off for a model.
 """
@@ -96,7 +101,7 @@ def _concurrency_limits() -> Dict[str, int]:
 
 CONCURRENCY_LIMITS = _concurrency_limits()
 LATENCY_TARGET_SECONDS = float(os.environ.get("LATENCY_TARGET_SECONDS", "2.0"))
-CONCURRENCY_MIN = max(1, int(os.environ.get("CONCURRENCY_MIN", "1")))
+CONCURRENCY_MIN = max(1, int(os.environ.get("CONCURRENCY_MIN", "2")))
 CONCURRENCY_MAX = max(CONCURRENCY_MIN, int(os.environ.get("CONCURRENCY_MAX", "32")))
 RETRY_AFTER_SECONDS = 1
 
@@ -172,9 +177,11 @@ class AdaptiveLimit:
     def adjust(self):
         """Called on every arrival and completion, acts at most once per ADJUST_EVERY.
 
-        Overload shows up two ways: finished requests were slow (P90), or a request
+        Slowness shows up two ways: finished requests were slow (P90), or a request
         still in progress has already waited past the target. The second matters
         when requests are slow, because then few finish and P90 alone reacts late.
+        Slowness only counts as overload when 2+ requests were in progress at once;
+        a lone slow request is a long input and says nothing about load.
         """
         now = time.monotonic()
         if now - self.last_adjust < self.ADJUST_EVERY:
@@ -184,8 +191,12 @@ class AdaptiveLimit:
         if len(self.samples) >= self.MIN_SAMPLES:
             ordered = sorted(self.samples)
             p90 = ordered[int(0.9 * (len(ordered) - 1))]
-        if oldest > LATENCY_TARGET_SECONDS or (p90 is not None and p90 > LATENCY_TARGET_SECONDS):
+        slow = oldest > LATENCY_TARGET_SECONDS or (p90 is not None and p90 > LATENCY_TARGET_SECONDS)
+        contended = max(self.peak_active, self.active) >= 2
+        if slow and contended:
             self.limit = max(CONCURRENCY_MIN, self.limit * self.DECREASE)
+        elif slow:
+            pass     # lone slow request: leave the limit alone, drop the evidence
         elif p90 is not None and self.peak_active >= self.allowed:
             # Only grow while the limit is really in use, or it creeps up while idle.
             self.limit = min(CONCURRENCY_MAX, self.limit + max(1.0, self.limit * self.INCREASE))
